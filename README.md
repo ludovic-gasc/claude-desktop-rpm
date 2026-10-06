@@ -1,17 +1,15 @@
-# Claude Desktop - rpm for Fedora Linux (amd64, arm64) & Asahi Fedora Linux (arm64)
+# Claude Desktop - rpm for Fedora and Enterprise Linux (x86_64, aarch64)
 
-An RPM spec file that, if you build it, downloads and repackages the Claude Desktop Windows Electron app so that you can install and run Claude Desktop natively on Fedora Linux.
+An RPM spec file that, if you build it, downloads Anthropic's official Linux build of Claude Desktop (the Debian package of its apt repository) and repackages it as an RPM, so that you can install and run Claude Desktop on Fedora, CentOS Stream, RHEL and their rebuilds.
 
-Status: Works well for me on Fedora Asahi 44 aarch64 (as of 1.11847.5 / 10-Jun-2026). Claude Code and MCPs are working. SSH, Preview and "Run in Terminal" in Claude Code are working. Claude Cowork is not available (it relies on a VM, which is very MacOS/Windows specific. Even the official Windows arm64 variant ships without it). The Claude Desktop menubar/tray icon is currently intentionally disabled due to work around a known issue. Other Fedora and EL versions and x86_64 are working, too but are only lightly tested (as I work on a Macbook). Feedback always appreciated.
-
-I aim to update this repo at least once per month for new Claude Desktop versions.
+Status: as of 2.19675.1 the spec repackages the official `.deb` as is (native Electron, native modules and Claude Code helpers), instead of patching the Windows package as earlier versions did. The download is checked against the SHA-256 published in the signed index of Anthropic's apt repository. Tested on CentOS Stream 10 x86_64 with KDE Plasma, including the third-party inference mode configured in `/etc/claude-desktop/managed-settings.json`. Claude Cowork needs QEMU/KVM and is not covered here.
 
 ## Build requirements
 
 prereqs for building:
 
 ```
-sudo dnf install rpmdevtools p7zip-plugins icoutils nodejs npm desktop-file-utils
+sudo dnf install rpm-build rpmdevtools binutils tar xz desktop-file-utils
 ```
 
 build the RPM:
@@ -40,10 +38,8 @@ build the RPM:
 ```
 spectool -g -R claude-desktop.spec
 
-mock --enable-network --spec claude-desktop.spec --sources "$(rpm --eval '%{_sourcedir}')"
+mock --spec claude-desktop.spec --sources "$(rpm --eval '%{_sourcedir}')"
 ```
-
-The `--enable-network` flag is required because `%prep` runs `npm install` to fetch electron and asar.
 
 The resulting RPM will be in `/var/lib/mock/<os>-<os-version>-<arch>/result/` and can get installed with:
 
@@ -57,6 +53,17 @@ And optionally cleanup after building:
 rpmbuild --rmsource claude-desktop.spec
 mock --clean
 ```
+
+## Updating to a new release
+
+Anthropic's apt repository lists every release with its checksum:
+
+```
+curl -fsS https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable/main/binary-amd64/Packages | awk '/^Version:/{v=$2} /^SHA256:/{print v, $2}' | sort -V | tail -1
+curl -fsS https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable/main/binary-arm64/Packages | awk '/^Version:/{v=$2} /^SHA256:/{print v, $2}' | sort -V | tail -1
+```
+
+Pick a version published for both architectures, then update `claude_version`, `sha256_amd64` and `sha256_arm64` in the spec.
 
 ## Disclaimer
 

@@ -1,6 +1,14 @@
-%global claude_version 2.2553.1
-%global electron_ver   44.2.0
-%global nodepty_ver    1.2.0-beta.14
+%global claude_version 2.19675.1
+# SHA-256 of each .deb, from the Packages index of Anthropic's signed apt
+# repository (dists/stable/main/binary-<arch>/Packages).
+%global sha256_amd64   9ba127eeccf270f6e60d35f5c5333654053bf0540c88fc82a009d01711b106fc
+%global sha256_arm64   681d122ae97d0eb302f0e6d92c7f232847064bb01746458dc50a2c095a40ed12
+
+# Prebuilt Electron app: nothing to strip, no debuginfo, and no build-id
+# links that would clash with other Electron apps.
+%global debug_package  %{nil}
+%global __os_install_post %{nil}
+%global _build_id_links none
 
 Name:           claude-desktop
 Version:        %{claude_version}
@@ -9,281 +17,123 @@ Summary:        Claude Desktop for Linux
 License:        Proprietary
 URL:            https://claude.com/download/
 
-# Squirrel package straight from the release feed
-# (https://downloads.claude.ai/releases/win32/arm64/RELEASES lists the current one),
-# so no per-release installer hash is needed any more.
-Source0:        https://downloads.claude.ai/releases/win32/arm64/AnthropicClaude-%{claude_version}-full.nupkg
+# Anthropic's official Linux build, repackaged as is.
+%global deb_pool https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop
+Source0:        %{deb_pool}/claude-desktop_%{claude_version}_amd64.deb
+Source1:        %{deb_pool}/claude-desktop_%{claude_version}_arm64.deb
 
 ExclusiveArch:  aarch64 x86_64
+# The bundled libraries (libffmpeg.so, libvulkan.so.1…) are private to the
+# app: neither provide nor require them.
 AutoReqProv:    no
 
-BuildRequires:  p7zip-plugins
-BuildRequires:  icoutils
-BuildRequires:  nodejs >= 22
-BuildRequires:  npm
+BuildRequires:  binutils
+BuildRequires:  tar
+BuildRequires:  xz
 BuildRequires:  desktop-file-utils
-# toolchain to compile node-pty from source (Claude Code "run in terminal")
-BuildRequires:  gcc-c++
-BuildRequires:  make
-BuildRequires:  python3
 
+# Debian dependencies of the .deb, by their Fedora/EL names.
 Requires:       gtk3
+Requires:       libnotify
 Requires:       nss
-Requires:       alsa-lib
-Requires:       cups-libs
-Requires:       dbus-libs
+Requires:       xdg-utils
+Requires:       at-spi2-core
+Requires:       libdrm
 Requires:       mesa-libgbm
+Requires:       libxcb
+Requires:       libsecret
+Requires:       libXtst
+Requires:       libuuid
+Requires:       pipewire-libs
+Requires:       xdg-desktop-portal
+Requires:       (xdg-desktop-portal-kde or xdg-desktop-portal-gtk or xdg-desktop-portal-gnome)
+Recommends:     alsa-lib
+Recommends:     ca-certificates
 
 %description
-Claude Desktop for Linux.
+Claude Desktop for Linux: Anthropic's official Linux build (the Debian
+package of its apt repository), repackaged as an RPM.
 
 # ---------------------------------------------------------------------------
-# %prep — download tools, extract installer, patch app
+# %%prep — check and unpack the Debian package
 # ---------------------------------------------------------------------------
 %prep
-# --- npm install asar + electron locally -----------------------------------
-mkdir -p %{_builddir}/_tools
-cd %{_builddir}/_tools
-npm install --no-save @electron/asar electron@%{electron_ver}
-# electron 42 removed the "postinstall": "node install.js" entry from its
-# package.json, so npm no longer fetches the runtime and node_modules/electron/dist
-# is never created. install.js is still shipped, so run it ourselves.
-( cd node_modules/electron && node install.js )
-test -d node_modules/electron/dist
-export PATH="%{_builddir}/_tools/node_modules/.bin:$PATH"
-
-# --- build node-pty from source for Linux ----------------------------------
-# The Windows installer only ships Windows node-pty binaries, so Claude Code's
-# "run in terminal" can't load the module on Linux. Build the same version the
-# app bundles (in its own dir with a package.json, so npm doesn't prune the
-# electron/asar install above and electron-rebuild can resolve the module tree)
-# and rebuild it against the electron ABI we ship.
-mkdir -p %{_builddir}/_pty
-cd %{_builddir}/_pty
-cat > package.json << 'PKG'
-{
-  "name": "claude-desktop-pty-build",
-  "version": "0.0.0",
-  "private": true,
-  "dependencies": {
-    "node-pty": "%{nodepty_ver}",
-    "@electron/rebuild": "^4"
-  }
-}
-PKG
-npm install
-%{_builddir}/_pty/node_modules/.bin/electron-rebuild --force \
-    --version %{electron_ver} --module-dir %{_builddir}/_pty --only node-pty
-cd %{_builddir}/_tools
-
-# --- extract package -------------------------------------------------------
-cd %{_builddir}
-7z x -y %{SOURCE0}
-
-# --- extract icons ----------------------------------------------------------
-wrestool -x -t 14 lib/net45/claude.exe -o claude.ico
-icotool -x claude.ico
-
-# --- extract and patch app.asar --------------------------------------------
-asar extract lib/net45/resources/app.asar app.asar.contents
-cp -r lib/net45/resources/app.asar.unpacked .
-
-# copy resources into asar contents
-mkdir -p app.asar.contents/resources/i18n
-cp lib/net45/resources/Tray* app.asar.contents/resources/
-cp lib/net45/resources/*.json app.asar.contents/resources/i18n/
-cp -r lib/net45/resources/fonts app.asar.contents/resources/ 2>/dev/null || :
-cp lib/net45/resources/*.png   app.asar.contents/resources/ 2>/dev/null || :
-cp lib/net45/resources/*.clod  app.asar.contents/resources/ 2>/dev/null || :
-# ion-dist renderer bundle (served via custom protocol from the resources dir)
-cp -r lib/net45/resources/ion-dist app.asar.contents/resources/ 2>/dev/null || :
-
-# native module stub
-mkdir -p app.asar.contents/node_modules/@ant/claude-native
-cat > app.asar.contents/node_modules/@ant/claude-native/index.js << 'STUB'
-const KeyboardKey = {
-  Backspace: 43, Tab: 280, Enter: 261, Shift: 272, Control: 61,
-  Alt: 40, CapsLock: 56, Escape: 85, Space: 276, PageUp: 251,
-  PageDown: 250, End: 83, Home: 154, LeftArrow: 175, UpArrow: 282,
-  RightArrow: 262, DownArrow: 81, Delete: 79, Meta: 187
-};
-Object.freeze(KeyboardKey);
-class AuthRequest {
-  static isAvailable() { return false; }
-  start() { return Promise.reject(new Error("Not available")); }
-  cancel() {}
-}
-module.exports = {
-  getWindowsVersion: () => "10.0.0",
-  getWindowsElevationType: () => "default",
-  getCurrentPackageFamilyName: () => "",
-  getActiveWindowHandle: () => null,
-  getAppInfoForFile: () => null,
-  focusWindow: () => {},
-  setWindowEffect: () => {},
-  removeWindowEffect: () => {},
-  getIsMaximized: () => false,
-  flashFrame: () => {},
-  clearFlashFrame: () => {},
-  showNotification: () => {},
-  setProgressBar: () => {},
-  clearProgressBar: () => {},
-  setOverlayIcon: () => {},
-  clearOverlayIcon: () => {},
-  readCfPrefValue: () => null,
-  readPlistValue: () => null,
-  readRegistryValues: () => [],
-  writeRegistryValue: () => {},
-  writeRegistryDword: () => {},
-  closeOfficeDocument: () => {},
-  focusOfficeDocument: () => false,
-  getWindowAbove: () => null,
-  isHardwareVirtEnabled: () => true,
-  isProcessRunning: () => Promise.resolve(false),
-  moveWindowBehind: () => {},
-  enableWindowsOptionalFeature: () => Promise.resolve({ success: false }),
-  AuthRequest,
-  KeyboardKey
-};
-STUB
-
-# --- sed patches on the main-process bundle --------------------------------
-# As of 2.x the main process is split into index.pre.js plus a few hundred
-# index.chunk-*.js files, so the patches below are applied across every JS file
-# in .vite/build rather than to a single index.js.
-_idx=$(find app.asar.contents/.vite/build -name '*.js')
-
-# native window decorations
-sed -i 's/titleBarStyle:"hidden"/titleBarStyle:"default"/g'      $_idx
-sed -i 's/titleBarStyle:"hiddenInset"/titleBarStyle:"default"/g' $_idx
-
-# Linux platform detection for Claude Code
-sed -i 's/if(process\.platform==="darwin")return e==="arm64"?"darwin-arm64":"darwin-x64";if(process\.platform==="win32")return e==="arm64"?"win32-arm64":"win32-x64";throw new Error/if(process.platform==="darwin")return e==="arm64"?"darwin-arm64":"darwin-x64";if(process.platform==="win32")return e==="arm64"?"win32-arm64":"win32-x64";if(process.platform==="linux")return e==="arm64"?"linux-arm64":"linux-x64";throw new Error/g' $_idx
-
-# file:// origin validation
-# (the minified receiver names change between releases, so match them loosely)
-sed -i -E 's/([A-Za-z0-9_$]+)\.protocol==="file:"&&[A-Za-z0-9_$]+\.app\.isPackaged===!0/\1.protocol==="file:"/g' $_idx
-
-# (the win32-only guard on the quit-on-close path is gone as of 2.x; the
-# menuBarEnabled patch below is enough to make the app quit on window close)
-
-# disable the system tray entirely (the tray icon is unreliable across Linux DEs,
-# e.g. not clickable on KDE Plasma). Force the menuBarEnabled getter to read false so
-# no tray is ever created and the window-close handler above quits the app. Anchored on
-# the stable "menuBarEnabled" key (not the minified getter) so it survives version bumps;
-# the trailing ")" avoids matching the setter/listener which take a second argument.
-# Must run AFTER the quit-on-close patch (which matches the literal Ci("menuBarEnabled")).
-sed -i 's/[A-Za-z0-9_$]\+("menuBarEnabled")/!1/g' $_idx
-
-# repack
-# --unpack "*.node" keeps native addons (node-pty's pty.node, claude-native)
-# out of the archive and marked unpacked, so they load from app.asar.unpacked
-# on disk instead of being extracted to /tmp. Without this the Windows pty.node
-# extracted from the installer gets packed in and shadows the Linux build we
-# overlay in %install, breaking Claude Code's "run in terminal".
-# --- Linux node-pty binary --------------------------------------------------
-# The Windows package only ships prebuilds/win32-arm64, so drop those and put the
-# Linux build where node-pty's loader looks first (../build/Release). It goes into
-# the asar contents so that --unpack below registers it in the archive header and
-# writes it out to app.asar.unpacked; a file missing from the header cannot be
-# required from inside the asar at all.
-rm -rf app.asar.contents/node_modules/node-pty/prebuilds \
-       app.asar.unpacked/node_modules/node-pty/prebuilds
-mkdir -p app.asar.contents/node_modules/node-pty/build/Release
-cp %{_builddir}/_pty/node_modules/node-pty/build/Release/pty.node \
-   app.asar.contents/node_modules/node-pty/build/Release/pty.node
-
-asar pack app.asar.contents app.asar --unpack "*.node"
+%ifarch x86_64
+%global deb_source %{SOURCE0}
+%global deb_sha256 %{sha256_amd64}
+%else
+%global deb_source %{SOURCE1}
+%global deb_sha256 %{sha256_arm64}
+%endif
+echo "%{deb_sha256}  %{deb_source}" | sha256sum --check --strict
+rm -rf deb data
+mkdir deb data
+cd deb
+ar x %{deb_source}
+tar -xf data.tar.* -C ../data
 
 # ---------------------------------------------------------------------------
-# %build — nothing to compile
+# %%build — nothing to compile
 # ---------------------------------------------------------------------------
 %build
 
 # ---------------------------------------------------------------------------
-# %install
+# %%install
 # ---------------------------------------------------------------------------
 %install
-export PATH="%{_builddir}/_tools/node_modules/.bin:$PATH"
-
-_elecdir=%{_builddir}/_tools/node_modules/electron/dist
-_dest=%{buildroot}%{_libdir}/%{name}
-
-# --- electron runtime -------------------------------------------------------
-mkdir -p "$_dest"/electron
-cp -r "$_elecdir"/* "$_dest"/electron/
-# strip non-en-US locales (~41 MB)
-find "$_dest"/electron/locales -type f ! -name 'en-US.pak' -delete
-# remove chromium license blob (~15 MB)
-rm -f "$_dest"/electron/LICENSES.chromium.html
-
-# --- app.asar ---------------------------------------------------------------
-install -Dm644 %{_builddir}/app.asar "$_dest"/app.asar
-
-# --- app.asar.unpacked (from installer, with native stub overlay) -----------
-cp -r %{_builddir}/app.asar.unpacked "$_dest"/
-mkdir -p "$_dest"/app.asar.unpacked/node_modules/@ant/claude-native
-cp %{_builddir}/app.asar.contents/node_modules/@ant/claude-native/index.js \
-   "$_dest"/app.asar.unpacked/node_modules/@ant/claude-native/index.js
-# remove Windows .node binary
-rm -f "$_dest"/app.asar.unpacked/node_modules/@ant/claude-native/claude-native-binding.node
-
-# node-pty's Linux binary is placed during %prep so that it is registered in the
-# asar header and unpacked next to the archive.
-
-# --- claude-ssh binaries ----------------------------------------------------
-# No longer bundled: as of 1.11187.4 the Windows installer ships no claude-ssh
-# directory. The app fetches the platform binary at runtime from
-# https://downloads.claude.ai/claude-ssh-releases (claude-ssh.zst), so the SSH
-# remote feature self-bootstraps and nothing needs to be installed here.
-
-# --- launcher script --------------------------------------------------------
-mkdir -p %{buildroot}%{_bindir}
-cat > %{buildroot}%{_bindir}/claude-desktop << 'LAUNCHER'
-#!/bin/bash
-exec %{_libdir}/claude-desktop/electron/electron %{_libdir}/claude-desktop/app.asar "$@"
-LAUNCHER
-chmod 0755 %{buildroot}%{_bindir}/claude-desktop
-
-# --- desktop file -----------------------------------------------------------
-mkdir -p %{buildroot}%{_datadir}/applications
-cat > %{buildroot}%{_datadir}/applications/claude-desktop.desktop << 'DESKTOP'
-[Desktop Entry]
-Name=Claude
-Exec=claude-desktop %u
-Icon=claude-desktop
-Type=Application
-Terminal=false
-Categories=Office;Utility;
-MimeType=x-scheme-handler/claude;
-StartupWMClass=claude
-DESKTOP
-desktop-file-install \
-    --dir=%{buildroot}%{_datadir}/applications \
-    %{buildroot}%{_datadir}/applications/claude-desktop.desktop
-
-# --- icons -------------------------------------------------------------------
-for size in 16 24 32 48 64 256; do
-    _icon=$(ls %{_builddir}/claude_*_${size}x${size}x32.png 2>/dev/null | head -1)
-    if [ -n "$_icon" ]; then
-        install -Dm644 "$_icon" \
-            %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps/claude-desktop.png
-    fi
-done
+cp -a data/. %{buildroot}/
+# Chromium's setuid sandbox helper, as in the .deb (tar drops the bit when
+# not run as root).
+chmod 4755 %{buildroot}/usr/lib/claude-desktop/chrome-sandbox
+# Debian-only metadata.
+rm -rf %{buildroot}%{_datadir}/lintian
+# The .deb's postinst copies these into place; ship them as files instead.
+_res=%{buildroot}/usr/lib/claude-desktop/resources
+install -Dm644 "$_res"/gnome-search-provider/com.anthropic.Claude.search-provider.ini \
+    %{buildroot}%{_datadir}/gnome-shell/search-providers/com.anthropic.Claude.search-provider.ini
+install -Dm644 "$_res"/gnome-search-provider/com.anthropic.Claude.SearchProvider.service \
+    %{buildroot}%{_datadir}/dbus-1/services/com.anthropic.Claude.SearchProvider.service
+# Launchers: /usr/bin/claude-desktop, and the `ccd` terminal launcher when
+# the build ships one (same link as the postinst).
+echo %{_bindir}/claude-desktop > bin.files
+if [ -x "$_res"/bin/ccd ]; then
+    ln -s ../lib/claude-desktop/resources/bin/ccd %{buildroot}%{_bindir}/ccd
+    echo %{_bindir}/ccd >> bin.files
+fi
+desktop-file-validate %{buildroot}%{_datadir}/applications/com.anthropic.Claude.desktop
+# The postinst also writes an AppArmor profile (EL uses SELinux) and
+# registers the apt repository: neither applies to an RPM.
 
 # ---------------------------------------------------------------------------
-%files
-%{_bindir}/claude-desktop
-%{_libdir}/%{name}
-%{_datadir}/applications/claude-desktop.desktop
+%files -f bin.files
+%dir /usr/lib/claude-desktop
+/usr/lib/claude-desktop/*
+%{_datadir}/applications/com.anthropic.Claude.desktop
 %{_datadir}/icons/hicolor/*/apps/claude-desktop.png
+%{_datadir}/gnome-shell/search-providers/com.anthropic.Claude.search-provider.ini
+%{_datadir}/dbus-1/services/com.anthropic.Claude.SearchProvider.service
+%doc %{_docdir}/claude-desktop
 
 %post
 gtk-update-icon-cache -f -t %{_datadir}/icons/hicolor || :
 touch -h %{_datadir}/icons/hicolor >/dev/null 2>&1 || :
 update-desktop-database %{_datadir}/applications || :
 
+%postun
+gtk-update-icon-cache -f -t %{_datadir}/icons/hicolor || :
+update-desktop-database %{_datadir}/applications || :
+
 %changelog
+* Wed Oct 07 2026 Claude Desktop Linux Maintainers - 2.19675.1-1
+- update to Claude Desktop 2.19675.1
+- repackage Anthropic's official Linux build (the .deb of its apt repository,
+  checked against the SHA-256 of the signed index) instead of patching the
+  Windows package: native Electron, claude-native and node-pty, so the
+  third-party inference configuration (/etc/claude-desktop/managed-settings.json)
+  is read
+- builds on EL 10 as well as Fedora (no 7-Zip, npm or compiler needed)
+- escape the macros in comments (rpm 4.19 rejects "%%install" in a comment)
+
 * Tue Sep 22 2026 Claude Desktop Linux Maintainers - 2.2553.1-1
 - update to Claude Desktop 2.2553.1
 - update Electron from 41.6.1 to 44.2.0, node-pty to 1.2.0-beta.14
@@ -292,7 +142,7 @@ update-desktop-database %{_datadir}/applications || :
 - fetch the electron runtime explicitly (electron 42 dropped its postinstall hook)
 - ship the Linux pty.node inside the asar header so it can be required
 
-* Tue Jun 10 2026 Claude Desktop Linux Maintainers - 1.11847.5-1
+* Wed Jun 10 2026 Claude Desktop Linux Maintainers - 1.11847.5-1
 - update to Claude Desktop 1.11847.5
 
 * Tue Jun 09 2026 Claude Desktop Linux Maintainers - 1.11187.4-1
